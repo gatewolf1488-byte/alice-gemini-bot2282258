@@ -1,17 +1,16 @@
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    return res.status(200).send('Alice Gemini Server is active');
+    return res.status(200).send('Alice DeepSeek Server is active');
   }
 
   const { request, session, state } = req.body || {};
   const command = request?.original_utterance || request?.command || '';
 
-  // При старте навыка или пустом запросе
   if (session?.new || !command.trim()) {
     return res.json({
       version: '1.0',
       response: {
-        text: 'Привет! Я умная Алиса на базе Gemini. О чём поговорим?',
+        text: 'Привет! Я умная Алиса на базе DeepSeek. О чём поговорим?',
         end_session: false,
       },
       session_state: { history: [] },
@@ -21,17 +20,27 @@ export default async function handler(req, res) {
   let history = state?.session?.history || [];
 
   try {
-    const geminiKey = process.env.GEMINI_API_KEY;
+    const deepseekKey = process.env.DEEPSEEK_API_KEY;
     const serperKey = process.env.SERPER_API_KEY;
 
-    // Поиск актуальной информации через Serper
+    if (!deepseekKey) {
+      return res.json({
+        version: '1.0',
+        response: {
+          text: 'Ошибка: API-ключ DEEPSEEK_API_KEY не добавлен в Vercel.',
+          end_session: false,
+        },
+      });
+    }
+
+    // Поиск свежих данных через Serper (если ключ добавлен)
     let searchContext = '';
     if (serperKey) {
       try {
         const searchRes = await fetch('https://google.serper.dev/search', {
           method: 'POST',
           headers: {
-            'X-API-KEY': serperKey,
+            'X-API-KEY': serperKey.trim(),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ q: command, hl: 'ru', gl: 'ru' }),
@@ -52,38 +61,50 @@ export default async function handler(req, res) {
     const systemInstruction =
       'Ты — голосовой ассистент Алиса. Отвечай кратко, емко и понятным языком. НЕ используй никакой markdown-разметки (без звездочек, решёток, жирного шрифта, списков), так как ответ будет зачитываться голосом. Ограничивай ответ 2-3 предложениями.';
 
-    const contents = [
+    // Формируем историю сообщений для DeepSeek (OpenAI format)
+    const messages = [
+      { role: 'system', content: systemInstruction },
       ...history,
-      {
-        role: 'user',
-        parts: [{ text: command + searchContext }],
-      },
+      { role: 'user', content: command + searchContext },
     ];
 
-    // Запрос к Gemini
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
-    const response = await fetch(geminiUrl, {
+    // Запрос к DeepSeek API
+    const response = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${deepseekKey.trim()}`,
+      },
       body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: systemInstruction }],
-        },
-        contents: contents,
+        model: 'deepseek-chat',
+        messages: messages,
+        temperature: 0.7,
       }),
     });
 
-    const geminiData = await response.json();
-    let replyText =
-      geminiData?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Не удалось получить ответ от Gemini.';
+    const data = await response.json();
 
-    // Очистка от маркдауна для зачитывания голосом
+    if (data.error) {
+      console.error('DeepSeek Error:', data.error);
+      return res.json({
+        version: '1.0',
+        response: {
+          text: `Ошибка DeepSeek: ${data.error.message || 'Проверьте API ключ'}`,
+          end_session: false,
+        },
+      });
+    }
+
+    let replyText =
+      data?.choices?.[0]?.message?.content ||
+      'Не удалось получить ответ от DeepSeek.';
+
+    // Убираем маркдаун для озвучки
     replyText = replyText.replace(/[*#_`]/g, '').trim();
 
-    // Сохранение контекста (до 6 сообщений)
-    history.push({ role: 'user', parts: [{ text: command }] });
-    history.push({ role: 'model', parts: [{ text: replyText }] });
+    // Сохраняем историю (последние 6 сообщений)
+    history.push({ role: 'user', content: command });
+    history.push({ role: 'assistant', content: replyText });
     if (history.length > 6) {
       history = history.slice(history.length - 6);
     }
@@ -103,7 +124,7 @@ export default async function handler(req, res) {
     return res.json({
       version: '1.0',
       response: {
-        text: 'Произошла ошибка при обработке запроса. Попробуйте еще раз.',
+        text: 'Произошла ошибка сервера. Попробуйте еще раз.',
         end_session: false,
       },
     });
